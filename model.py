@@ -17,7 +17,7 @@ from tensorflow.python.training import moving_averages
 IMG_WIDTH = 512
 IMG_HEIGHT = 256
 IMG_DISPARITY = 192
-
+AGGREGATION_PROJECT=5
 class E2EModel(object):
 	def __init__(self,
 				 image=None,
@@ -30,7 +30,7 @@ class E2EModel(object):
 		self.mode=mode
 		self._extra_train_ops = []
 		self.lrn_rate=0.0001
-
+		self.simulation=20
 	def build_graph(self):
 		self.global_step=tf.contrib.framework.get_or_create_global_step()
 		self._build_model()
@@ -298,15 +298,59 @@ class E2EModel(object):
 			out=tf.nn.conv3d_transpose(out,weights,output,strides=stride,padding='SAME')
 
 		return out
+	def refer(self,image):
+		#image=1*h*w*3
+		with tf.variable_scope('refer1'):
+			kernel=[3,3,3,32]
+			stride=[1,1,1,1]
+			out=self._sia_conv(image,kernel,stride)
 
+		with tf.variable_scope('refer2'):
+			out=self._residual_cnn(out)
+			out=self._batch_norm('refer2_bn',out)
+			out=self._relu(out,0)
+		with tf.variable_scope('refer3'):
+			kernel=[3,3,32,1]
+			stride=[1,1,1,1]
+			out=self._sia_conv(out,kernel,stride)
+		return tf.reshape(out,[1,1,IMG_HEIGHT,IMG_WIDTH,1])
 	"""
-	def _softargmin(self,disparity):
-		disparity=-tf.reshape(disparity,[IMG_DISPARITY])
-		probability=tf.nn.softmax(disparity)
-		d=tf.range(IMG_DISPARITY,dtype=tf.float32)
-		sum=tf.reduce_sum(d*probability)/IMG_DISPARITY
-		return sum
+	def simulate(self,cost):
+		#cost shape batch*d*h*w*1
+		with tf.variable_scope('simulate1'):
+			costmap=tf.reshape(cost,[1,IMG_DISPARITY,IMG_HEIGHT,IMG_WIDTH,1])
+			kernel=[3,3,3,1,8]
+			stride=[1,2,2,2,1]
+			#n=kernel[0]*kernel[1]*kernel[2]*kernel[4]
+			weights=tf.get_variable('weights',kernel,tf.float32,initializer=tf.constant_initializer(1.0/125))
+			conv=tf.nn.conv3d(costmap,weights,strides=stride,padding='SAME')
+		with tf.variable_scope('simulate2'):
+			kernel=[3,3,3,8,8]
+			stride=[1,2,2,2,1]
+			#n=kernel[0]*kernel[1]*kernel[2]*kernel[4]
+			weights=tf.get_variable('weights',kernel,tf.float32,initializer=tf.constant_initializer(1.0/125))
+			conv=tf.nn.conv3d(conv,weights,strides=stride,padding='SAME')
+		with tf.variable_scope('simulate4'):
+			kernel=[3,3,3,8,8]
+			stride=[1,4,4,4,1]
+			output=tf.constant([1,IMG_DISPARITY,IMG_HEIGHT,IMG_WIDTH,8])
+			#n=kernel[0]*kernel[1]*kernel[2]*kernel[4]
+			weights=tf.get_variable('weights',kernel,tf.float32,initializer=tf.constant_initializer(1.0/125))
+			conv=tf.nn.conv3d_transpose(conv,weights,output,strides=stride,padding='SAME')
+		return conv
 	"""
+	def _aggregation(self,left,image):
+		with tf.device('/gpu:3'):
+			with tf.variable_scope('aggregation'):
+				#1*d*h*w*n
+				#simulateimage=self.simulate(left)
+				#1*1*h*w*n
+				referimage=self.refer(image)
+				aggrecost=tf.reduce_mean(left*referimage,4)
+		return aggrecost
+
+
+
 	def _todisparity(self,volume):
 		with tf.variable_scope('soft_argmin'):
 			d=np.arange(IMG_DISPARITY,dtype=np.float32)
@@ -329,14 +373,7 @@ class E2EModel(object):
 			single_dis=tf.concat([linput,rsplits],3)
 			lvolume.append(single_dis)
 		lvol=tf.stack(lvolume,axis=0)
-		rvolume=[]
-		for i in range(int(IMG_DISPARITY/2)):
-			splits=tf.split(linput,[i,int(IMG_WIDTH/2-i)],axis=2)
-			lsplits=tf.concat([splits[1],splits[0]],axis=2)
-			single_dis=tf.concat([rinput,lsplits],3)
-			rvolume.append(single_dis)
-		rvol=tf.stack(rvolume,axis=0)
-		return lvol,rvol
+		return lvol
 
 	def _loss(self,pre,mode):
 		ground=tf.split(self.labels,num_or_size_splits=2,axis=1)
@@ -364,29 +401,25 @@ class E2EModel(object):
 			right=self.siamese_cnn(rimage)
 
 		#create the cost volume from w*h*f to d*w*h*(2*f)
-		left,right=self._create_volume(left,right)
+		left=self._create_volume(left,right)
 		left=tf.transpose(left,perm=[1,0,2,3,4])
-		right=tf.transpose(right,perm=[1,0,2,3,4])
+		#right=tf.transpose(right,perm=[1,0,2,3,4])
 		#3d convolution
 		
 		with tf.variable_scope('3d_conv') as scope:
 			left=self._3d_cnn(left)
-			scope.reuse_variables()
-			right=self._3d_cnn(right)
+			#scope.reuse_variables()
+			#right=self._3d_cnn(right)
 		
+		reference=self._aggregation(left,limage)
 		with tf.variable_scope('soft_argmin'):
-			ldisparities=self._todisparity(left)
-			scope.reuse_variables()
-			rdisparities=self._todisparity(right)
-			#ldisparities=tf.get_variable('ldisparity',[IMG_HEIGHT,IMG_WIDTH],tf.float32,initializer=tf.random_normal_initializer())
-			#rdisparities=tf.get_variable('rdisparity',[IMG_HEIGHT,IMG_WIDTH],tf.float32,initializer=tf.random_normal_initializer())
+			ldisparities=self._todisparity(reference)
+
 		self.lpre=tf.reshape(ldisparities,[1,IMG_HEIGHT,IMG_WIDTH,1])/255
-		self.rpre=tf.reshape(rdisparities,[1,IMG_HEIGHT,IMG_WIDTH,1])/255
-		side=np.random.random_integers(2)-1
-		if side==0:
-			self.loss=self._loss(ldisparities,side)
-		else:
-			self.loss=self._loss(rdisparities,side)
+
+
+		self.loss=self._loss(ldisparities,0)
+
 		tf.summary.scalar('loss',self.loss)
 		tf.summary.scalar('error1',self.error1)
 		tf.summary.scalar('error2',self.error2)
@@ -414,15 +447,24 @@ class E2EModel(object):
 			var2=tf.trainable_variables()[50:80]
 			grad2=tf.gradients(self.loss, var2,name='gradients2')
 		"""
-		#with tf.device('/gpu:0'):
-		var3=tf.trainable_variables()
-		grad3=tf.gradients(self.loss, var3,name='gradients3')
+		with tf.device('/gpu:3'):
+			var3=tf.trainable_variables()
+			grad3=tf.gradients(self.loss, var3,name='gradients3')
 		"""
 		with tf.device('/gpu:3'):
 			var2=tf.trainable_variables()[90:96]
 			grad2=gra_gpu.gradients(self.loss, var2,name='gradients')
 			"""
 		#with tf.device('/gpu:0'):
+		"""
+		optimizer = tf.train.AdamOptimizer(
+			learning_rate=self.lrn_rate,
+			beta1=0.9,
+			beta2=0.999,
+			epsilon=1e-10,
+			use_locking=False,
+			name='Adam')
+		"""
 		optimizer = tf.train.RMSPropOptimizer(
 			self.lrn_rate,
 			decay=0.9,
@@ -441,7 +483,7 @@ class E2EModel(object):
 		"""
 		apply_op3 = optimizer.apply_gradients(
 			zip(grad3, var3),
-			global_step=self.global_step, name='train_step3')
+			global_step=self.global_step, name='train_step')
 		"""
 		apply_op2 = optimizer.apply_gradients(
 			zip(grad2, var2),

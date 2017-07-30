@@ -68,7 +68,7 @@ def train():
 	rground=tf.reshape(ground[1],[1,IMG_HEIGHT,IMG_WIDTH,1])
 	summary_hook = tf.train.SummarySaverHook(
       save_steps=100,
-      output_dir=r'D:\GC-Base\log\output',
+      output_dir=r'D:\RAN\log\output',
       summary_op=tf.summary.merge([model.summaries,
       							tf.summary.image('oril',lground/255,max_outputs=1),tf.summary.image('orir',rground/255,max_outputs=1),
       							tf.summary.image('limg_s',limg_s,max_outputs=3),tf.summary.image('rimg_s',rimg_s,max_outputs=3),
@@ -104,7 +104,7 @@ def train():
 			else:
 				self._lrn_rate = 0.0001
 	with tf.train.MonitoredTrainingSession(
-      checkpoint_dir=r'D:\GC-Base\log',
+      checkpoint_dir=r'D:\RAN\log',
       hooks=[logging_hook, _LearningRateSetterHook()],
       chief_only_hooks=[summary_hook],
       # Since we provide a SummarySaverHook, we need to disable default
@@ -151,7 +151,7 @@ def train():
 	    coord.request_stop()
 	    coord.join(threads)
 	"""
-def evaluate():
+#def evaluate():
 	
 	"""
 		images,disparities=get_input(1) 
@@ -166,9 +166,10 @@ def evaluate():
 	    coord.join(threads)
 train()
 """
-for d in ['/gpu:0','/gpu:1','/gpu:2', '/gpu:3']:
-	with tf.device(d):
-		train()
+#for d in ['/gpu:0','/gpu:1','/gpu:2']:
+#	with tf.device(d):
+with tf.device('/gpu:0'):
+	train()
 
 	 
  
